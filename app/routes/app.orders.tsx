@@ -1,10 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -21,14 +21,18 @@ const GET_ORDERS = `#graphql
           createdAt
           displayFulfillmentStatus
           totalPriceSet {
-            shopMoney {
-              amount
-              currencyCode
-            }
+            shopMoney { amount currencyCode }
           }
           customer {
             displayName
             phone
+          }
+          shippingAddress {
+            address1
+            address2
+            city
+            province
+            country
           }
           lineItems(first: 20) {
             edges {
@@ -37,9 +41,12 @@ const GET_ORDERS = `#graphql
                 quantity
                 variant {
                   title
-                  image { url }
+                  product {
+                    images(first: 1) {
+                      edges { node { url } }
+                    }
+                  }
                 }
-                image { url }
               }
             }
           }
@@ -61,19 +68,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     where: { shop: session.shop },
     select: { orderId: true },
   });
-  const sentIds = new Set(sent.map((s) => s.orderId));
 
   const config = await prisma.whatsappConfig.findUnique({
     where: { shop: session.shop },
     select: { groupId: true, groupName: true },
   });
 
-  return { orders, sentIds: [...sentIds], config };
+  return { orders, sentIds: sent.map((s) => s.orderId), config };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
-
   const form = await request.formData();
   const orderId = form.get("orderId") as string;
 
@@ -92,9 +97,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         id
         name
         displayFulfillmentStatus
-        totalPriceSet {
-          shopMoney { amount currencyCode }
-        }
+        totalPriceSet { shopMoney { amount currencyCode } }
         customer { displayName phone }
         lineItems(first: 20) {
           edges {
@@ -103,9 +106,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               quantity
               variant {
                 title
-                image { url }
+                product {
+                  images(first: 1) {
+                    edges { node { url } }
+                  }
+                }
               }
-              image { url }
             }
           }
         }
@@ -116,10 +122,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const orderJson = await orderRes.json();
   const o = orderJson.data?.order;
-
-  if (!o) {
-    return { error: "Order not found." };
-  }
+  if (!o) return { error: "Order not found." };
 
   const payload: OrderData = {
     orderNumber: o.name.replace("#", ""),
@@ -133,7 +136,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       title: e.node.title,
       quantity: e.node.quantity,
       variantTitle: e.node.variant?.title ?? null,
-      imageUrl: e.node.image?.url ?? e.node.variant?.image?.url ?? null,
+      imageUrl: e.node.variant?.product?.images?.edges?.[0]?.node?.url ?? null,
     })),
   };
 
@@ -148,10 +151,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return { success: true, orderName: o.name };
 };
 
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function formatAddress(addr: any): string {
+  if (!addr) return "—";
+  return [addr.address1, addr.address2, addr.city, addr.country]
+    .filter(Boolean)
+    .join(", ");
+}
+
+const th: React.CSSProperties = {
+  padding: "12px 10px",
+  textAlign: "left",
+  fontWeight: 600,
+  fontSize: 13,
+  color: "#6d7175",
+  borderBottom: "2px solid #e1e3e5",
+  whiteSpace: "nowrap",
+};
+
+const td: React.CSSProperties = {
+  padding: "12px 10px",
+  verticalAlign: "middle",
+  borderBottom: "1px solid #e1e3e5",
+};
+
+// ─── component ──────────────────────────────────────────────────────────────
+
 export default function OrdersPage() {
   const { orders, sentIds, config } = useLoaderData<typeof loader>();
   const sendFetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
+  const revalidator = useRevalidator();
+  const revalidatorRef = useRef(revalidator);
+  revalidatorRef.current = revalidator;
+
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const sentSet = new Set(sentIds);
   const submittingId =
@@ -159,149 +196,219 @@ export default function OrdersPage() {
       ? (sendFetcher.formData?.get("orderId") as string | null)
       : null;
 
+  // Real-time updates via SSE — when Shopify fires orders/updated webhook
+  // the server pokes this stream and we revalidate immediately
   useEffect(() => {
-    if (sendFetcher.data && "success" in sendFetcher.data) {
+    const es = new EventSource("/api/orders-sse");
+    es.onmessage = () => {
+      if (revalidatorRef.current.state === "idle") {
+        revalidatorRef.current.revalidate();
+      }
+    };
+    return () => es.close();
+  }, []);
+
+  // Toast feedback
+  useEffect(() => {
+    if (!sendFetcher.data) return;
+    if ("success" in sendFetcher.data) {
       shopify.toast.show(`${sendFetcher.data.orderName} sent to WhatsApp ✓`);
-    }
-    if (sendFetcher.data && "error" in sendFetcher.data) {
+    } else if ("error" in sendFetcher.data) {
       shopify.toast.show(sendFetcher.data.error as string, { isError: true });
     }
   }, [sendFetcher.data]);
 
+  const filtered = orders.filter(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (o: any) =>
+      !search.trim() ||
+      o.name
+        .toLowerCase()
+        .includes(search.trim().toLowerCase().replace(/^#/, "")),
+  );
+
+  const allSelected =
+    filtered.length > 0 &&
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    filtered.every((o: any) => selected.has(o.id));
+
+  const toggleAll = () => {
+    if (allSelected) {
+      setSelected(new Set());
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      setSelected(new Set(filtered.map((o: any) => o.id)));
+    }
+  };
+
+  const toggleOne = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const send = (orderId: string) => {
+    sendFetcher.submit({ orderId }, { method: "post" });
+  };
+
   return (
-    <s-page heading="Orders">
+    <s-page heading={`${orders.length} Orders`}>
       {!config?.groupId && (
         <s-section heading="Setup required">
           <s-paragraph>
-            Please configure your WhatsApp group in{" "}
+            Configure your WhatsApp group in{" "}
             <s-link href="/app/whatsapp-setup">WhatsApp Setup</s-link> before
             sending orders.
           </s-paragraph>
         </s-section>
       )}
 
-      <s-section heading={`Recent orders (${orders.length})`}>
-        {orders.length === 0 && (
-          <s-paragraph>No orders found in your store.</s-paragraph>
-        )}
-
+      <s-section>
         <s-stack direction="block" gap="base">
-          {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-          {orders.map((order: any) => {
-            const isSent = sentSet.has(order.id);
-            const isSending = submittingId === order.id;
-            const items = order.lineItems.edges.map((e: any) => e.node);
-            const date = new Date(order.createdAt).toLocaleDateString("en-GB", {
-              day: "numeric",
-              month: "short",
-              year: "numeric",
-            });
+          {/* Search */}
+          <s-text>Search orders</s-text>
+          <div style={{ display: "flex", gap: 8, maxWidth: 560 }}>
+            <input
+              type="text"
+              placeholder="e.g. #1001, #1002 or 1001 1002"
+              value={search}
+              onChange={(e) => setSearch(e.currentTarget.value)}
+              style={{
+                flex: 1,
+                padding: "8px 12px",
+                fontSize: 14,
+                border: "1px solid #c9cccf",
+                borderRadius: 6,
+                outline: "none",
+              }}
+            />
+            <button
+              onClick={() => setSearch("")}
+              style={{
+                padding: "8px 16px",
+                fontSize: 14,
+                border: "1px solid #c9cccf",
+                borderRadius: 6,
+                background: "white",
+                cursor: "pointer",
+              }}
+            >
+              {search ? "Clear" : "Search"}
+            </button>
+          </div>
 
-            return (
-              <s-box
-                key={order.id}
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <s-stack direction="inline" gap="loose" align="start">
-                  {/* Order info */}
-                  <s-stack direction="block" gap="tight" style={{ flex: 1 }}>
-                    <s-stack direction="inline" gap="tight" align="center">
-                      <s-heading>{order.name}</s-heading>
-                      {isSent && <s-badge tone="success">Sent</s-badge>}
-                    </s-stack>
+          {/* Table */}
+          <div style={{ overflowX: "auto", borderRadius: 8, border: "1px solid #e1e3e5" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+              <thead style={{ background: "#f6f6f7" }}>
+                <tr>
+                  <th style={{ ...th, width: 40 }}>
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleAll}
+                    />
+                  </th>
+                  <th style={th}>Order</th>
+                  <th style={th}>Customer</th>
+                  <th style={th}>Address</th>
+                  <th style={th}>Payment</th>
+                  <th style={th}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                {filtered.map((order: any) => {
+                  const isSent = sentSet.has(order.id);
+                  const isSending = submittingId === order.id;
+                  const isSelected = selected.has(order.id);
 
-                    <s-text subdued>
-                      {date} · {order.customer?.displayName ?? "Guest"}
-                      {order.customer?.phone
-                        ? ` · ${order.customer.phone}`
-                        : ""}
-                    </s-text>
-
-                    <s-text subdued>
-                      {order.displayFulfillmentStatus} ·{" "}
-                      {order.totalPriceSet.shopMoney.currencyCode}{" "}
-                      {order.totalPriceSet.shopMoney.amount}
-                    </s-text>
-
-                    {/* Line items with thumbnails */}
-                    <s-stack direction="block" gap="tight">
-                      {items.map((item: any, idx: number) => {
-                        const imgUrl =
-                          item.image?.url ?? item.variant?.image?.url ?? null;
-                        const variant =
-                          item.variant?.title &&
-                          item.variant.title !== "Default Title"
-                            ? ` (${item.variant.title})`
-                            : "";
-                        return (
-                          <s-stack
-                            key={idx}
-                            direction="inline"
-                            gap="tight"
-                            align="center"
-                          >
-                            {imgUrl ? (
-                              <img
-                                src={imgUrl}
-                                alt={item.title}
-                                style={{
-                                  width: 48,
-                                  height: 48,
-                                  objectFit: "cover",
-                                  borderRadius: 4,
-                                  flexShrink: 0,
-                                }}
-                              />
-                            ) : (
-                              <div
-                                style={{
-                                  width: 48,
-                                  height: 48,
-                                  borderRadius: 4,
-                                  background: "#e4e5e7",
-                                  flexShrink: 0,
-                                  display: "flex",
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                  fontSize: 20,
-                                }}
-                              >
-                                📦
-                              </div>
-                            )}
-                            <s-text>
-                              {item.title}
-                              {variant} × {item.quantity}
-                            </s-text>
-                          </s-stack>
-                        );
-                      })}
-                    </s-stack>
-                  </s-stack>
-
-                  {/* Send button */}
-                  <div style={{ flexShrink: 0 }}>
-                    <s-button
-                      variant={isSent ? "tertiary" : "primary"}
-                      {...(isSending ? { loading: true } : {})}
-                      {...(isSending ? { disabled: true } : {})}
-                      onClick={() => {
-                        sendFetcher.submit(
-                          { orderId: order.id },
-                          { method: "post" },
-                        );
-                      }}
+                  return (
+                    <tr
+                      key={order.id}
+                      style={{ background: isSelected ? "#f0f7ff" : "white" }}
                     >
-                      {isSent ? "Resend" : "Send to WhatsApp"}
-                    </s-button>
-                  </div>
-                </s-stack>
-              </s-box>
-            );
-          })}
+                      <td style={td}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleOne(order.id)}
+                        />
+                      </td>
+
+                      <td style={td}>
+                        <div
+                          style={{ color: "#2c6ecb", fontWeight: 600, fontSize: 14 }}
+                        >
+                          {order.name}
+                        </div>
+                        {isSent && (
+                          <div style={{ color: "#008060", fontSize: 12, marginTop: 2 }}>
+                            ✓ Sent
+                          </div>
+                        )}
+                      </td>
+
+                      <td style={td}>
+                        <div style={{ fontWeight: 500 }}>
+                          {order.customer?.displayName ?? "Guest"}
+                        </div>
+                        {order.customer?.phone && (
+                          <div style={{ color: "#6d7175", fontSize: 13, marginTop: 2 }}>
+                            {order.customer.phone}
+                          </div>
+                        )}
+                      </td>
+
+                      <td style={{ ...td, color: "#6d7175", maxWidth: 220 }}>
+                        {formatAddress(order.shippingAddress)}
+                      </td>
+
+                      <td style={{ ...td, fontWeight: 500 }}>
+                        {order.totalPriceSet.shopMoney.currencyCode}{" "}
+                        {Number(order.totalPriceSet.shopMoney.amount).toLocaleString()}
+                      </td>
+
+                      <td style={td}>
+                        <button
+                          onClick={() => send(order.id)}
+                          disabled={isSending}
+                          style={{
+                            background: isSending ? "#6d7175" : "#1a1a1a",
+                            color: "white",
+                            border: "none",
+                            borderRadius: 6,
+                            padding: "8px 18px",
+                            fontSize: 14,
+                            fontWeight: 500,
+                            cursor: isSending ? "not-allowed" : "pointer",
+                            whiteSpace: "nowrap",
+                            minWidth: 70,
+                          }}
+                        >
+                          {isSending ? "Sending…" : isSent ? "Resend" : "Send"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {filtered.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={6}
+                      style={{ ...td, textAlign: "center", color: "#6d7175", padding: 32 }}
+                    >
+                      No orders found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </s-stack>
       </s-section>
     </s-page>
