@@ -31,6 +31,11 @@ declare global {
   var __waState: WAState | undefined;
 }
 
+// Prevent WhatsApp errors from ever crashing the Node.js process
+process.on("unhandledRejection", (reason) => {
+  console.error("[whatsapp] unhandled rejection (ignored):", reason);
+});
+
 function createClient(): { client: Client; state: WAState } {
   const state: WAState = { status: "disconnected", qrDataUrl: null };
 
@@ -38,7 +43,7 @@ function createClient(): { client: Client; state: WAState } {
     authStrategy: new LocalAuth({ dataPath: ".wwebjs_auth" }),
     puppeteer: {
       headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -50,27 +55,41 @@ function createClient(): { client: Client; state: WAState } {
     },
   });
 
+  // Wrap async handlers so a throw never becomes an unhandled rejection
   client.on("qr", async (qr: string) => {
-    state.status = "qr_pending";
-    state.qrDataUrl = await qrcode.toDataURL(qr);
+    try {
+      state.status = "qr_pending";
+      state.qrDataUrl = await qrcode.toDataURL(qr);
+    } catch (err) {
+      console.error("[whatsapp] QR generation failed:", err);
+    }
   });
 
   client.on("ready", () => {
     state.status = "connected";
     state.qrDataUrl = null;
+    console.log("[whatsapp] Client ready");
   });
 
-  client.on("auth_failure", () => {
+  client.on("auth_failure", (msg) => {
+    console.error("[whatsapp] Auth failure:", msg);
     state.status = "disconnected";
     state.qrDataUrl = null;
   });
 
-  client.on("disconnected", () => {
+  client.on("disconnected", (reason) => {
+    console.warn("[whatsapp] Disconnected:", reason);
     state.status = "disconnected";
     state.qrDataUrl = null;
   });
 
-  client.initialize().catch(console.error);
+  // Delay init so the HTTP server starts first, then Chrome launches in background
+  setTimeout(() => {
+    client.initialize().catch((err) => {
+      console.error("[whatsapp] initialize() failed:", err);
+      state.status = "disconnected";
+    });
+  }, 3000);
 
   return { client, state };
 }
@@ -78,18 +97,25 @@ function createClient(): { client: Client; state: WAState } {
 let waClient: Client;
 let waState: WAState;
 
-if (process.env.NODE_ENV === "production") {
-  const result = createClient();
-  waClient = result.client;
-  waState = result.state;
-} else {
-  if (!global.__waClient || !global.__waState) {
+try {
+  if (process.env.NODE_ENV === "production") {
     const result = createClient();
-    global.__waClient = result.client;
-    global.__waState = result.state;
+    waClient = result.client;
+    waState = result.state;
+  } else {
+    if (!global.__waClient || !global.__waState) {
+      const result = createClient();
+      global.__waClient = result.client;
+      global.__waState = result.state;
+    }
+    waClient = global.__waClient;
+    waState = global.__waState;
   }
-  waClient = global.__waClient;
-  waState = global.__waState;
+} catch (err) {
+  console.error("[whatsapp] Failed to create client:", err);
+  // Provide a dummy state so the rest of the app still works
+  waState = { status: "disconnected", qrDataUrl: null };
+  waClient = null as unknown as Client;
 }
 
 export function getWAStatus(): WAStatus {
@@ -102,10 +128,14 @@ export function getWAQRDataUrl(): string | null {
 
 export async function getWAGroups(): Promise<Array<{ id: string; name: string }>> {
   if (waState.status !== "connected") return [];
-  const chats = await waClient.getChats();
-  return chats
-    .filter((chat) => chat.isGroup)
-    .map((chat) => ({ id: chat.id._serialized, name: chat.name }));
+  try {
+    const chats = await waClient.getChats();
+    return chats
+      .filter((chat) => chat.isGroup)
+      .map((chat) => ({ id: chat.id._serialized, name: chat.name }));
+  } catch {
+    return [];
+  }
 }
 
 export async function sendOrderToGroup(groupId: string, order: OrderData): Promise<void> {
