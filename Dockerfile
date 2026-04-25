@@ -1,4 +1,4 @@
-FROM node:20-slim AS build
+FROM node:22-slim AS build
 
 # Install Chromium + dependencies required by Puppeteer on Linux
 RUN apt-get update && apt-get install -y \
