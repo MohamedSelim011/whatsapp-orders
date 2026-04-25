@@ -1,4 +1,4 @@
-FROM node:22-slim AS build
+FROM node:22-slim
 
 # Install Chromium + dependencies required by Puppeteer on Linux
 RUN apt-get update && apt-get install -y \
@@ -21,11 +21,17 @@ RUN npm ci && npm cache clean --force
 
 COPY . .
 
+# Generate Prisma client at build time (memory-heavy, don't do at startup)
+RUN npx prisma generate
+
 ENV NODE_ENV=production
 RUN npm run build
 
 # Remove devDependencies after build to slim down the runtime image
 RUN npm prune --omit=dev
+
+# Cap Node heap to avoid OOM on Railway's memory limit
+ENV NODE_OPTIONS="--max-old-space-size=384"
 
 EXPOSE 8080
 
