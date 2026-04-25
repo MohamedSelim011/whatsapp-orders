@@ -1,6 +1,22 @@
+### ── Stage 1: build ──────────────────────────────────────────────
+FROM node:22-slim AS builder
+
+RUN apt-get update && apt-get install -y openssl --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm ci && npm cache clean --force
+
+COPY . .
+RUN npx prisma generate
+ENV NODE_ENV=production
+RUN npm run build
+
+### ── Stage 2: runtime (lean) ────────────────────────────────────
 FROM node:22-slim
 
-# Install Chromium + dependencies required by Puppeteer on Linux
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-freefont-ttf \
@@ -10,28 +26,21 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Tell Puppeteer to skip downloading its own Chrome binary
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-
-COPY package.json package-lock.json* ./
-
-# Install ALL deps (including devDependencies) for the build step
-RUN npm ci && npm cache clean --force
-
-COPY . .
-
-# Generate Prisma client at build time (memory-heavy, don't do at startup)
-RUN npx prisma generate
-
 ENV NODE_ENV=production
-RUN npm run build
+# Keep V8 heap small — the heavy work (Puppeteer) only runs on-demand
+ENV NODE_OPTIONS="--max-old-space-size=256"
 
-# Remove devDependencies after build to slim down the runtime image
-RUN npm prune --omit=dev
+# Copy only production node_modules (no devDeps bloat)
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-# Cap Node heap to avoid OOM on Railway's memory limit
-ENV NODE_OPTIONS="--max-old-space-size=384"
+# Copy the built app + prisma client from the builder
+COPY --from=builder /app/build ./build
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /app/prisma ./prisma
 
 EXPOSE 8080
 
