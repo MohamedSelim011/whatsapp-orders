@@ -29,10 +29,8 @@ WORKDIR /app
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV NODE_ENV=production
-# Keep V8 heap small — the heavy work (Puppeteer) only runs on-demand
-ENV NODE_OPTIONS="--max-old-space-size=256"
 
-# Copy only production node_modules (no devDeps bloat)
+# Copy only production node_modules
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev && npm cache clean --force
 
@@ -44,4 +42,7 @@ COPY --from=builder /app/prisma ./prisma
 
 EXPOSE 8080
 
-CMD ["npm", "run", "docker-start"]
+# Run directly — no npm wrappers.
+# "npm run X" spawns an extra Node process (~80MB) that just sits there.
+# By calling the binaries directly we run ONE Node process instead of three.
+CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node --max-old-space-size=256 ./node_modules/@react-router/serve/bin.js ./build/server/index.js"]
