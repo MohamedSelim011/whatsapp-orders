@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y openssl --no-install-recommends \
 
 WORKDIR /app
 
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
 COPY package.json package-lock.json* ./
 RUN npm ci && npm cache clean --force
 
