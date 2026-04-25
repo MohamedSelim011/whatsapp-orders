@@ -7,6 +7,7 @@ type WAStatus = "disconnected" | "qr_pending" | "connected";
 interface WAState {
   status: WAStatus;
   qrDataUrl: string | null;
+  initializing: boolean;
 }
 
 export interface OrderData {
@@ -28,98 +29,97 @@ declare global {
   // eslint-disable-next-line no-var
   var __waClient: Client | undefined;
   // eslint-disable-next-line no-var
-  var __waState: WAState | undefined;
+  var __waState: WAState;
 }
 
-// Prevent WhatsApp errors from ever crashing the Node.js process
+// Shared state — works across HMR reloads in dev
+if (!global.__waState) {
+  global.__waState = { status: "disconnected", qrDataUrl: null, initializing: false };
+}
+const waState = global.__waState;
+
+// Prevent any WhatsApp error from ever crashing the process
 process.on("unhandledRejection", (reason) => {
-  console.error("[whatsapp] unhandled rejection (ignored):", reason);
+  if (String(reason).includes("whatsapp") || String(reason).includes("puppeteer")) {
+    console.error("[whatsapp] suppressed unhandled rejection:", reason);
+  }
 });
 
-function createClient(): { client: Client; state: WAState } {
-  const state: WAState = { status: "disconnected", qrDataUrl: null };
+// Call this from the setup page action — safe to call multiple times
+export function initWhatsApp(): void {
+  if (waState.initializing || waState.status === "connected") return;
+  if (global.__waClient) return; // already exists
 
-  const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: ".wwebjs_auth" }),
-    puppeteer: {
-      headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-zygote",
-      ],
-    },
-  });
+  waState.initializing = true;
 
-  // Wrap async handlers so a throw never becomes an unhandled rejection
-  client.on("qr", async (qr: string) => {
-    try {
-      state.status = "qr_pending";
-      state.qrDataUrl = await qrcode.toDataURL(qr);
-    } catch (err) {
-      console.error("[whatsapp] QR generation failed:", err);
-    }
-  });
+  try {
+    const client = new Client({
+      authStrategy: new LocalAuth({ dataPath: ".wwebjs_auth" }),
+      puppeteer: {
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+          "--no-first-run",
+          "--no-zygote",
+        ],
+      },
+    });
 
-  client.on("ready", () => {
-    state.status = "connected";
-    state.qrDataUrl = null;
-    console.log("[whatsapp] Client ready");
-  });
+    client.on("qr", async (qr: string) => {
+      try {
+        waState.status = "qr_pending";
+        waState.qrDataUrl = await qrcode.toDataURL(qr);
+      } catch (err) {
+        console.error("[whatsapp] QR error:", err);
+      }
+    });
 
-  client.on("auth_failure", (msg) => {
-    console.error("[whatsapp] Auth failure:", msg);
-    state.status = "disconnected";
-    state.qrDataUrl = null;
-  });
+    client.on("ready", () => {
+      waState.status = "connected";
+      waState.qrDataUrl = null;
+      waState.initializing = false;
+      console.log("[whatsapp] Connected");
+    });
 
-  client.on("disconnected", (reason) => {
-    console.warn("[whatsapp] Disconnected:", reason);
-    state.status = "disconnected";
-    state.qrDataUrl = null;
-  });
+    client.on("auth_failure", (msg) => {
+      console.error("[whatsapp] Auth failure:", msg);
+      waState.status = "disconnected";
+      waState.initializing = false;
+    });
 
-  // Delay init so the HTTP server starts first, then Chrome launches in background
-  setTimeout(() => {
+    client.on("disconnected", (reason) => {
+      console.warn("[whatsapp] Disconnected:", reason);
+      waState.status = "disconnected";
+      waState.qrDataUrl = null;
+      waState.initializing = false;
+      global.__waClient = undefined;
+    });
+
     client.initialize().catch((err) => {
       console.error("[whatsapp] initialize() failed:", err);
-      state.status = "disconnected";
+      waState.status = "disconnected";
+      waState.initializing = false;
+      global.__waClient = undefined;
     });
-  }, 3000);
 
-  return { client, state };
-}
-
-let waClient: Client;
-let waState: WAState;
-
-try {
-  if (process.env.NODE_ENV === "production") {
-    const result = createClient();
-    waClient = result.client;
-    waState = result.state;
-  } else {
-    if (!global.__waClient || !global.__waState) {
-      const result = createClient();
-      global.__waClient = result.client;
-      global.__waState = result.state;
-    }
-    waClient = global.__waClient;
-    waState = global.__waState;
+    global.__waClient = client;
+  } catch (err) {
+    console.error("[whatsapp] createClient() failed:", err);
+    waState.status = "disconnected";
+    waState.initializing = false;
   }
-} catch (err) {
-  console.error("[whatsapp] Failed to create client:", err);
-  // Provide a dummy state so the rest of the app still works
-  waState = { status: "disconnected", qrDataUrl: null };
-  waClient = null as unknown as Client;
 }
 
 export function getWAStatus(): WAStatus {
   return waState.status;
+}
+
+export function getWAInitializing(): boolean {
+  return waState.initializing;
 }
 
 export function getWAQRDataUrl(): string | null {
@@ -127,9 +127,9 @@ export function getWAQRDataUrl(): string | null {
 }
 
 export async function getWAGroups(): Promise<Array<{ id: string; name: string }>> {
-  if (waState.status !== "connected") return [];
+  if (waState.status !== "connected" || !global.__waClient) return [];
   try {
-    const chats = await waClient.getChats();
+    const chats = await global.__waClient.getChats();
     return chats
       .filter((chat) => chat.isGroup)
       .map((chat) => ({ id: chat.id._serialized, name: chat.name }));
@@ -139,7 +139,7 @@ export async function getWAGroups(): Promise<Array<{ id: string; name: string }>
 }
 
 export async function sendOrderToGroup(groupId: string, order: OrderData): Promise<void> {
-  if (waState.status !== "connected") {
+  if (waState.status !== "connected" || !global.__waClient) {
     throw new Error("WhatsApp is not connected");
   }
 
@@ -164,7 +164,7 @@ export async function sendOrderToGroup(groupId: string, order: OrderData): Promi
     `💰 *Total:* ${order.currency} ${order.total}\n` +
     `📍 *Status:* ${order.fulfillmentStatus}`;
 
-  await waClient.sendMessage(groupId, message);
+  await global.__waClient.sendMessage(groupId, message);
 
   for (const item of order.lineItems) {
     if (item.imageUrl) {
@@ -174,7 +174,7 @@ export async function sendOrderToGroup(groupId: string, order: OrderData): Promi
           item.variantTitle && item.variantTitle !== "Default Title"
             ? ` (${item.variantTitle})`
             : "";
-        await waClient.sendMessage(groupId, media, {
+        await global.__waClient.sendMessage(groupId, media, {
           caption: `${item.title}${variant} × ${item.quantity}`,
         });
       } catch {

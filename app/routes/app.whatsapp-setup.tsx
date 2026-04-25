@@ -7,26 +7,40 @@ import type {
 import { useFetcher, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { getWAQRDataUrl, getWAStatus, getWAGroups } from "../whatsapp.server";
+import {
+  getWAQRDataUrl,
+  getWAStatus,
+  getWAGroups,
+  getWAInitializing,
+  initWhatsApp,
+} from "../whatsapp.server";
 import prisma from "../db.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
 
   const status = getWAStatus();
+  const initializing = getWAInitializing();
   const qrDataUrl = getWAQRDataUrl();
   const groups = status === "connected" ? await getWAGroups() : [];
   const config = await prisma.whatsappConfig.findUnique({
     where: { shop: session.shop },
   });
 
-  return { status, qrDataUrl, groups, config };
+  return { status, initializing, qrDataUrl, groups, config };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
 
   const form = await request.formData();
+  const intent = form.get("intent") as string;
+
+  if (intent === "start") {
+    initWhatsApp();
+    return { started: true };
+  }
+
   const groupId = form.get("groupId") as string;
   const groupName = form.get("groupName") as string;
 
@@ -40,20 +54,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function WhatsappSetup() {
-  const { status, qrDataUrl, groups, config } =
+  const { status, initializing, qrDataUrl, groups, config } =
     useLoaderData<typeof loader>();
 
-  const saveFetcher = useFetcher<typeof action>();
-  const statusFetcher = useFetcher<{ status: string; qrDataUrl: string | null }>();
+  const actionFetcher = useFetcher<typeof action>();
+  const statusFetcher = useFetcher<{
+    status: string;
+    qrDataUrl: string | null;
+  }>();
 
   const [liveStatus, setLiveStatus] = useState(status);
+  const [liveInitializing, setLiveInitializing] = useState(initializing);
   const [liveQR, setLiveQR] = useState(qrDataUrl);
   const [liveGroups, setLiveGroups] = useState(groups);
   const [selectedGroupId, setSelectedGroupId] = useState(config?.groupId ?? "");
   const [selectedGroupName, setSelectedGroupName] = useState(config?.groupName ?? "");
-  const saved = saveFetcher.data?.success;
+  const saved = actionFetcher.data && "success" in actionFetcher.data;
 
-  // Poll status every 3 seconds until connected
+  // Poll status every 3 seconds while not connected
   useEffect(() => {
     if (liveStatus === "connected") return;
     const interval = setInterval(() => {
@@ -68,38 +86,64 @@ export default function WhatsappSetup() {
     if (!statusFetcher.data) return;
     setLiveStatus(statusFetcher.data.status);
     setLiveQR(statusFetcher.data.qrDataUrl);
-    // Once connected, reload to get groups list
     if (statusFetcher.data.status === "connected" && liveGroups.length === 0) {
       window.location.reload();
     }
   }, [statusFetcher.data]);
 
-  const statusLabel: Record<string, string> = {
-    disconnected: "⚫  Disconnected — waiting for WhatsApp...",
-    qr_pending: "🟡  Scan the QR code below with your phone",
-    connected: "🟢  Connected and ready",
-  };
+  // When "start" action returns, begin polling
+  useEffect(() => {
+    if (actionFetcher.data && "started" in actionFetcher.data) {
+      setLiveInitializing(true);
+    }
+  }, [actionFetcher.data]);
+
+  const isStarting =
+    liveInitializing ||
+    (actionFetcher.state !== "idle" &&
+      actionFetcher.formData?.get("intent") === "start");
 
   return (
     <s-page heading="WhatsApp Setup">
       <s-section heading="Connection Status">
-        <s-paragraph>
-          <strong>{statusLabel[liveStatus] ?? liveStatus}</strong>
-        </s-paragraph>
+        {/* Not started yet */}
+        {liveStatus === "disconnected" && !isStarting && (
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              Click the button below to start WhatsApp. Your browser will open a
+              QR code to scan with your dedicated phone.
+            </s-paragraph>
+            <s-button
+              variant="primary"
+              onClick={() =>
+                actionFetcher.submit({ intent: "start" }, { method: "post" })
+              }
+            >
+              Connect WhatsApp
+            </s-button>
+          </s-stack>
+        )}
 
-        {liveStatus === "disconnected" && (
-          <s-paragraph>
-            The server is starting WhatsApp. A QR code will appear in a few
-            seconds — keep this page open.
-          </s-paragraph>
+        {/* Starting / waiting for QR */}
+        {liveStatus === "disconnected" && isStarting && (
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              <strong>🟡 Starting WhatsApp...</strong>
+            </s-paragraph>
+            <s-paragraph>
+              Launching browser in the background — QR code will appear here in
+              a few seconds.
+            </s-paragraph>
+          </s-stack>
         )}
 
         {liveStatus === "qr_pending" && liveQR && (
           <s-stack direction="block" gap="base">
             <s-paragraph>
-              On your dedicated phone, open WhatsApp →{" "}
-              <strong>Settings → Linked Devices → Link a Device</strong> and
-              scan this code.
+              <strong>🟡 Scan the QR code with your phone</strong>
+            </s-paragraph>
+            <s-paragraph>
+              Open WhatsApp → <strong>Settings → Linked Devices → Link a Device</strong>
             </s-paragraph>
             <img
               src={liveQR}
@@ -107,14 +151,15 @@ export default function WhatsappSetup() {
               style={{ width: 240, height: 240, display: "block" }}
             />
             <s-paragraph>
-              <em>Refreshes automatically every few seconds...</em>
+              <em>Refreshes automatically...</em>
             </s-paragraph>
           </s-stack>
         )}
 
         {liveStatus === "connected" && (
           <s-paragraph>
-            WhatsApp is linked. You can now select the group below.
+            <strong>🟢 Connected and ready</strong> — select your orders group
+            below.
           </s-paragraph>
         )}
       </s-section>
@@ -129,7 +174,8 @@ export default function WhatsappSetup() {
             <select
               value={selectedGroupId}
               onChange={(e) => {
-                const opt = e.currentTarget.options[e.currentTarget.selectedIndex];
+                const opt =
+                  e.currentTarget.options[e.currentTarget.selectedIndex];
                 setSelectedGroupId(e.currentTarget.value);
                 setSelectedGroupName(opt?.text ?? "");
               }}
@@ -155,7 +201,7 @@ export default function WhatsappSetup() {
                 variant="primary"
                 onClick={() => {
                   if (!selectedGroupId) return;
-                  saveFetcher.submit(
+                  actionFetcher.submit(
                     { groupId: selectedGroupId, groupName: selectedGroupName },
                     { method: "post" },
                   );
@@ -164,9 +210,7 @@ export default function WhatsappSetup() {
                 Save Group
               </s-button>
               {saved && (
-                <s-badge tone="success">
-                  Saved — {selectedGroupName}
-                </s-badge>
+                <s-badge tone="success">Saved — {selectedGroupName}</s-badge>
               )}
               {!saved && config?.groupName && (
                 <s-paragraph>
