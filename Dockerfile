@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:20-slim AS build
 
 # Install Chromium + dependencies required by Puppeteer on Linux
 RUN apt-get update && apt-get install -y \
@@ -13,13 +13,19 @@ WORKDIR /app
 # Tell Puppeteer to skip downloading its own Chrome binary
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV NODE_ENV=production
 
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev && npm cache clean --force
+
+# Install ALL deps (including devDependencies) for the build step
+RUN npm ci && npm cache clean --force
 
 COPY . .
+
+ENV NODE_ENV=production
 RUN npm run build
+
+# Remove devDependencies after build to slim down the runtime image
+RUN npm prune --omit=dev
 
 EXPOSE 8080
 

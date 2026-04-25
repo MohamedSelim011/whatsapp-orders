@@ -55,6 +55,12 @@ export default defineConfig({
   build: {
     assetsInlineLimit: 0,
   },
+  ssr: {
+    // Keep these OUT of the server bundle so dynamic import() works at runtime.
+    // Without this, Vite resolves and inlines whatsapp-web.js + Puppeteer at
+    // build time, bloating the bundle and causing OOM on Railway at startup.
+    external: ["whatsapp-web.js", "qrcode", "puppeteer"],
+  },
   optimizeDeps: {
     include: ["@shopify/app-bridge-react"],
   },
