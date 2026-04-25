@@ -42,7 +42,6 @@ COPY --from=builder /app/prisma ./prisma
 
 EXPOSE 8080
 
-# Run directly — no npm wrappers.
-# "npm run X" spawns an extra Node process (~80MB) that just sits there.
-# By calling the binaries directly we run ONE Node process instead of three.
-CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node --max-old-space-size=256 ./node_modules/@react-router/serve/bin.js ./build/server/index.js"]
+# 1. Run migrations
+# 2. "exec" replaces sh with node as PID 1 so Railway's SIGTERM reaches Node directly
+CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && exec node ./node_modules/@react-router/serve/bin.js ./build/server/index.js"]
