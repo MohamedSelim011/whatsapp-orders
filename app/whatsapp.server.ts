@@ -14,6 +14,7 @@ export interface OrderData {
   orderNumber: string;
   customerName: string;
   customerPhone: string | null;
+  shippingAddress: string | null;
   total: string;
   currency: string;
   fulfillmentStatus: string;
@@ -162,9 +163,13 @@ export async function sendOrderToGroup(groupId: string, order: OrderData): Promi
     ? `\n📱 *Phone:* ${order.customerPhone}`
     : "";
 
+  const addressText = order.shippingAddress
+    ? `\n🏠 *Address:* ${order.shippingAddress}`
+    : "";
+
   const message =
     `🛍️ *New Order #${order.orderNumber}*\n\n` +
-    `👤 *Customer:* ${order.customerName}${phoneText}\n\n` +
+    `👤 *Customer:* ${order.customerName}${phoneText}${addressText}\n\n` +
     `📦 *Items:*\n${itemsText}\n\n` +
     `💰 *Total:* ${order.currency} ${order.total}\n` +
     `📍 *Status:* ${order.fulfillmentStatus}`;

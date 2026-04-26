@@ -99,6 +99,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         displayFulfillmentStatus
         totalPriceSet { shopMoney { amount currencyCode } }
         customer { displayName phone }
+        shippingAddress {
+          address1
+          address2
+          city
+          province
+          country
+          phone
+        }
         lineItems(first: 20) {
           edges {
             node {
@@ -106,6 +114,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               quantity
               variant {
                 title
+                image { url }
                 product {
                   images(first: 1) {
                     edges { node { url } }
@@ -124,10 +133,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const o = orderJson.data?.order;
   if (!o) return { error: "Order not found." };
 
+  const addr = o.shippingAddress;
+  const shippingAddress = addr
+    ? [addr.address1, addr.address2, addr.city, addr.province, addr.country]
+        .filter(Boolean)
+        .join(", ")
+    : null;
+
   const payload: OrderData = {
     orderNumber: o.name.replace("#", ""),
     customerName: o.customer?.displayName ?? "Guest",
-    customerPhone: o.customer?.phone ?? null,
+    customerPhone: o.customer?.phone ?? o.shippingAddress?.phone ?? null,
+    shippingAddress,
     total: o.totalPriceSet.shopMoney.amount,
     currency: o.totalPriceSet.shopMoney.currencyCode,
     fulfillmentStatus: o.displayFulfillmentStatus,
@@ -136,7 +153,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       title: e.node.title,
       quantity: e.node.quantity,
       variantTitle: e.node.variant?.title ?? null,
-      imageUrl: e.node.variant?.product?.images?.edges?.[0]?.node?.url ?? null,
+      imageUrl:
+        e.node.variant?.image?.url ??
+        e.node.variant?.product?.images?.edges?.[0]?.node?.url ??
+        null,
     })),
   };
 
