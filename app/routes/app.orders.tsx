@@ -13,7 +13,7 @@ import { sendOrderToGroup, type OrderData } from "../whatsapp.server";
 
 const GET_ORDERS = `#graphql
   query GetOrders {
-    orders(first: 50, sortKey: CREATED_AT, reverse: true) {
+    orders(first: 200, sortKey: CREATED_AT, reverse: true) {
       edges {
         node {
           id
@@ -209,6 +209,8 @@ export default function OrdersPage() {
 
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [sendQueue, setSendQueue] = useState<string[]>([]);
+  const [bulkTotal, setBulkTotal] = useState(0);
 
   const sentSet = new Set(sentIds);
   const submittingId =
@@ -228,11 +230,26 @@ export default function OrdersPage() {
     return () => es.close();
   }, []);
 
+  // Process bulk send queue: whenever the fetcher goes idle and there are
+  // queued orders, submit the next one automatically.
+  useEffect(() => {
+    if (sendFetcher.state !== "idle") return;
+    if (sendQueue.length === 0) return;
+    const [next, ...rest] = sendQueue;
+    setSendQueue(rest);
+    sendFetcher.submit({ orderId: next }, { method: "post" });
+  }, [sendFetcher.state, sendQueue]);
+
   // Toast feedback
   useEffect(() => {
     if (!sendFetcher.data) return;
     if ("success" in sendFetcher.data) {
-      shopify.toast.show(`${sendFetcher.data.orderName} sent to WhatsApp ✓`);
+      if (sendQueue.length === 0 && bulkTotal > 1) {
+        shopify.toast.show(`${bulkTotal} orders sent to WhatsApp ✓`);
+        setBulkTotal(0);
+      } else if (bulkTotal <= 1) {
+        shopify.toast.show(`${sendFetcher.data.orderName} sent to WhatsApp ✓`);
+      }
     } else if ("error" in sendFetcher.data) {
       shopify.toast.show(sendFetcher.data.error as string, { isError: true });
     }
@@ -273,6 +290,18 @@ export default function OrdersPage() {
   const send = (orderId: string) => {
     sendFetcher.submit({ orderId }, { method: "post" });
   };
+
+  const sendAll = () => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBulkTotal(ids.length);
+    setSelected(new Set());
+    const [first, ...rest] = ids;
+    setSendQueue(rest);
+    sendFetcher.submit({ orderId: first }, { method: "post" });
+  };
+
+  const isBulkSending = sendQueue.length > 0 || (bulkTotal > 1 && sendFetcher.state !== "idle");
 
   return (
     <s-page heading={`${orders.length} Orders`}>
@@ -319,6 +348,34 @@ export default function OrdersPage() {
               {search ? "Clear" : "Search"}
             </button>
           </div>
+
+          {/* Bulk action bar */}
+          {selected.size > 1 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <span style={{ fontSize: 14, color: "#6d7175" }}>
+                {selected.size} orders selected
+              </span>
+              <button
+                onClick={sendAll}
+                disabled={isBulkSending}
+                style={{
+                  background: isBulkSending ? "#6d7175" : "#008060",
+                  color: "white",
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "8px 20px",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  cursor: isBulkSending ? "not-allowed" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {isBulkSending
+                  ? `Sending… (${sendQueue.length + 1} left)`
+                  : `Send All (${selected.size})`}
+              </button>
+            </div>
+          )}
 
           {/* Table */}
           <div style={{ overflowX: "auto", borderRadius: 8, border: "1px solid #e1e3e5" }}>
