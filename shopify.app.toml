@@ -1,8 +1,8 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "0ead7c412a971341c8a5410e48e26cb0"
-name = "whatsapp-orders"
-application_url = "https://whatsapp-orders-production-0a3d.up.railway.app"
+client_id = "b80cdaddd9a480c37703cf4bc9c3da9e"
+name = "gold-whatsapp-orders"
+application_url = "https://whatsapp-orders-production-edf4.up.railway.app"
 embedded = true
 
 [build]
@@ -28,7 +28,7 @@ api_version = "2026-07"
 scopes = "write_products,write_metaobjects,write_metaobject_definitions,read_orders,read_customers"
 
 [auth]
-redirect_urls = [ "https://whatsapp-orders-production-0a3d.up.railway.app/auth/callback" ]
+redirect_urls = [ "https://whatsapp-orders-production-edf4.up.railway.app/auth/callback" ]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"
